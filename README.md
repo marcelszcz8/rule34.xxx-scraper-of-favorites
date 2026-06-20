@@ -2,7 +2,7 @@
 
 Changes:
 
-+ The script now takes a favorites_id as an argument and constructs the URL for the favorites page.
++ The script now takes a favorites_id as an argument and downloads from it.
 
 - can't donload from tags but for it just use original project 
 
