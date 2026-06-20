@@ -17,12 +17,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-VERSION = "1.3.7"   # 1.3.7 Added rate limiter
-                    #       Added progress output
-                    # 1.3.6 Changed how downloaded files are named. new format:
-                    #       post_id artist_tags#copyright_tags#character-tags.file_extension
-                    #       Old format bloated the filename and wasn't necessary with how default directories are now named
-                   
+VERSION = "1.3.7.fork"   #fork by M4rc37lo007 that added downloading favorites 
+
 class RequestThrottler:    
     def __init__(self, requests_per_second=1):
         self.min_interval = 1.0 / requests_per_second
@@ -86,9 +82,9 @@ def get_media_page_data(url):
 def sanitize_filename(filename):
     return re.sub(r'[\/:*?"<>|]', '_', filename)
 
-def file_exists(download_dir, post_id):
+def file_exists(download_dir, post_id, index):
     for file in os.listdir(download_dir):
-        if file.startswith(post_id + " "):
+        if file.startswith(f"{post_id}_{index} "):
             return file
     return None
 
@@ -109,10 +105,6 @@ def download_file(url, filename, download_dir):
     except requests.exceptions.RequestException as e:
         logger.error(f"Download failed for {filename}: {e}")
 
-def construct_gallery_url(tags, start=0):
-    base_url = "https://rule34.xxx/index.php?page=post&s=list&tags="
-    return f"{base_url}{'+'.join(tags)}&pid={start}"
-
 def write_to_csv(file, results):
     with open(file, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f, delimiter='|')
@@ -123,11 +115,10 @@ def write_to_csv(file, results):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('tags', nargs='+', help='Tags')
+    parser.add_argument('favorites_id', type=int, help='Favorites ID')
     parser.add_argument('-f', '--file', help='Output file')
     parser.add_argument('-d', '--download_dir', help='Directory to save files')
     parser.add_argument('-l', '--limit', type=int, default=42, help='Limit of results')
-    parser.add_argument('-s', '--start', type=int, default=0, help='Starting pid for pagination')
     parser.add_argument('-rps', '--requests_per_second', type=float, default=None, help='Max requests per second (default 1)')
     parser.add_argument('-rpm', '--requests_per_minute', type=float, default=None, help='Max requests per minute (default 60)')
                     
@@ -145,72 +136,68 @@ def main():
 
     throttler = RequestThrottler(rps)   # initializing the request throttler
     
-    tag_string = ' '.join(args.tags)
-    args.file = args.file or f'{tag_string}.csv'
+    args.file = args.file or f'{args.favorites_id}.csv'
     if not args.file.endswith(".csv"): args.file += (".csv")
-    args.download_dir = args.download_dir or tag_string
+    args.download_dir = args.download_dir or f'favorites_{args.favorites_id}'
     os.makedirs(args.download_dir, exist_ok=True)
     fetch_count = 0
-    page_start = args.start
 
-    logger.info("Script started with tags: " + tag_string)
+    logger.info(f"Script started with favorites ID: {args.favorites_id}")
 
-    while fetch_count < args.limit:
-        gallery_url = construct_gallery_url(args.tags, page_start)
-        logger.info(f"Fetching gallery page: {gallery_url}")
-        print(f"Fetching gallery page: {gallery_url}")
-        
-        with throttler:                             # same as before, but using request throttler
-            gallery_soup = get_soup(gallery_url)
-            
-        if not gallery_soup:
+    favorites_url = f"https://rule34.xxx/index.php?page=favorites&s=view&id={args.favorites_id}"
+    logger.info(f"Fetching favorites page: {favorites_url}")
+    print(f"Fetching favorites page: {favorites_url}")
+
+    with throttler:                             
+        favorites_soup = get_soup(favorites_url)
+    
+    if not favorites_soup:
+        logger.error("Failed to fetch favorites page.")
+        return
+
+    posts = favorites_soup.select('.thumb')
+    if not posts:
+        logger.info("No posts found in favorites.")
+        return
+
+    results = []
+    for index, post in enumerate(posts):
+        if fetch_count >= args.limit:
             break
         
-        posts = gallery_soup.select('.thumb')
-        if not posts:
-            break
+        post_id = post.get('id', 'Unknown')
+        href = post.a['href']
+        full_url = requests.compat.urljoin(favorites_url, href)
         
-        results = []
-        for post in posts:
-            if fetch_count >= args.limit:
-                break
-            
-            post_id_match = re.search(r'\d+', post['id'])
-            post_id = post_id_match.group() if post_id_match else "Unknown"
-            href = post.a['href']
-            full_url = requests.compat.urljoin(gallery_url, href)
-            
-            logger.info(f"Fetching post {post_id}")
-            print(f"Fetching {post_id} ({fetch_count+1}/{args.limit})")
-            duplicate = file_exists(args.download_dir, post_id)
-            
-            if duplicate:
-                logger.info(f"Skipping {post_id}, duplicate found: {duplicate}")
-                print(f"Skipping - duplicate found: {duplicate}")
-                results.append([post_id, "", "skipped", "", "", "", "", "", duplicate])
-            else:
-                with throttler:     # same as before, but using request throttler
-                    media_url, copyright_tags, character_tags, artist_tags, general_tags, meta_tags, post_date = get_media_page_data(full_url)
-                    
-                if not media_url:
-                    logger.warning(f"No media found for {post_id}, skipping.")
-                    continue
-                file_extension = os.path.splitext(media_url.split('?')[0])[-1]
-                filename = sanitize_filename(f"{post_id} {' '.join(artist_tags)}#{' '.join(copyright_tags)}#{' '.join(character_tags)}"[:250] + file_extension)
-
-                print(f"Downloading {filename}")
+        logger.info(f"Fetching post {post_id}")
+        print(f"Fetching {post_id} ({fetch_count+1}/{args.limit})")
+        duplicate = file_exists(args.download_dir, post_id, index)
+        
+        if duplicate:
+            logger.info(f"Skipping {post_id}, duplicate found: {duplicate}")
+            print(f"Skipping - duplicate found: {duplicate}")
+            results.append([post_id, "", "skipped", "", "", "", "", "", duplicate])
+        else:
+            with throttler:     # same as before, but using request throttler
+                media_url, copyright_tags, character_tags, artist_tags, general_tags, meta_tags, post_date = get_media_page_data(full_url)
                 
-                with throttler:     # same as before, but using request throttler
-                    download_file(media_url, filename, args.download_dir)
-                    
-                download_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                results.append([post_id, post_date, download_date, ', '.join(copyright_tags), ', '.join(character_tags), ', '.join(artist_tags), ', '.join(general_tags), ', '.join(meta_tags), filename])
-            fetch_count += 1
-        write_to_csv(args.file, results)
-        page_start += 42    # Each page has 42 entries. Why 42? Because we are old.
+            if not media_url:
+                logger.warning(f"No media found for {post_id}, skipping.")
+                continue
+            file_extension = os.path.splitext(media_url.split('?')[0])[-1]
+            filename = sanitize_filename(f"{post_id}_{index} {' '.join(artist_tags)}#{' '.join(copyright_tags)}#{' '.join(character_tags)}"[:250] + file_extension)
+
+            print(f"Downloading {filename}")
+            
+            with throttler:     # same as before, but using request throttler
+                download_file(media_url, filename, args.download_dir)
+                
+            download_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            results.append([post_id, post_date, download_date, ', '.join(copyright_tags), ', '.join(character_tags), ', '.join(artist_tags), ', '.join(general_tags), ', '.join(meta_tags), filename])
+        fetch_count += 1
+    write_to_csv(args.file, results)
 
     logger.info("Script completed successfully.")
 
 if __name__ == "__main__":
     main()
-
