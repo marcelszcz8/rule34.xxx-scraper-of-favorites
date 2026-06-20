@@ -10,7 +10,7 @@ How to Use :
 
 python rule34xxx-scraper.py [your favorites id] (and the rest same as the in original project)
 
-you favorites id must be in  not so 
+you favorites id must be according to this:
 
 this is ok : your id
 
